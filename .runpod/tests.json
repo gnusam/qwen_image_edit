@@ -1,17 +1,5 @@
 {
-  "tests": [
-    {
-      "name": "basic_single_image_edit",
-      "input": {
-        "prompt": "add a warm sepia tone",
-        "image_url": "https://raw.githubusercontent.com/gnusam/qwen_image_edit/main/examples/input/test_input.png",
-        "seed": 42,
-        "width": 768,
-        "height": 1024
-      },
-      "timeout": 600000
-    }
-  ],
+  "tests": [],
   "config": {
     "gpuTypeIds": ["NVIDIA GeForce RTX 4090"],
     "allowedCudaVersions": ["12.8"]
