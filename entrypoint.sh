@@ -63,7 +63,13 @@ echo "Using CUDA device: $CUDA_VISIBLE_DEVICES"
 
 # Start ComfyUI in the background
 echo "Starting ComfyUI in the background..."
-python /ComfyUI/main.py --listen --use-sage-attention &
+# NOTE: --use-sage-attention removed due to incompatibility with Qwen models.
+# Sage Attention produces NaN values during inference on Qwen, which pass
+# through the VAE decode and result in all-black output images. This was
+# manifesting as ~50% of fresh workers returning tiny black PNGs regardless
+# of prompt content.
+# Ref: https://github.com/comfyanonymous/ComfyUI/issues/9629
+python /ComfyUI/main.py --listen &
 
 # Wait for ComfyUI to be ready
 echo "Waiting for ComfyUI to be ready..."
