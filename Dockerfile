@@ -19,6 +19,15 @@ RUN cd /ComfyUI/custom_nodes/ && \
     cd ComfyUI-Manager && \
     pip install --no-cache-dir -r requirements.txt
 
+# Disable ComfyUI-Manager network fetches at startup.
+# Without this, every cold boot spends ~4min fetching the ComfyRegistry
+# (139 pages from api.comfy.org) + 5 raw JSON caches from GitHub, which
+# competes with the first job for network bandwidth.
+# Writing to both legacy and new manager config paths for compatibility.
+RUN mkdir -p /ComfyUI/user/default/ComfyUI-Manager /ComfyUI/user/__manager && \
+    printf '[default]\nnetwork_mode = offline\n' > /ComfyUI/user/default/ComfyUI-Manager/config.ini && \
+    printf '[default]\nnetwork_mode = offline\n' > /ComfyUI/user/__manager/config.ini
+
 RUN cd /ComfyUI/custom_nodes/ && \
     git clone https://github.com/kijai/ComfyUI-KJNodes && \
     cd ComfyUI-KJNodes && \
