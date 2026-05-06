@@ -4,6 +4,8 @@
     "image_url": "https://example.com/your-reference-image.jpg",
     "seed": 12345,
     "width": 768,
-    "height": 1024
+    "height": 1024,
+    "lora_url": "https://huggingface.co/your/lora-repo/resolve/main/your-lora.safetensors",
+    "lora_scale": 1.0
   }
 }

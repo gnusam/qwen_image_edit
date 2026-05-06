@@ -3,6 +3,7 @@ from runpod.serverless.utils import rp_upload
 import os
 import websocket
 import base64
+import hashlib
 import json
 import uuid
 import logging
@@ -153,6 +154,94 @@ _NODE_PROMPT = "111"
 _NODE_WIDTH = "128"   # 현재 워크플로우에는 없음(선택 적용)
 _NODE_HEIGHT = "129"  # 현재 워크플로우에는 없음(선택 적용)
 
+# LoRA chaining: workflow ships with a Lightning LoRA at node 89 (UNet -> 89 -> 66).
+# When the caller passes lora_url, we insert a second LoraLoaderModelOnly between
+# 89 and 66 so the user LoRA stacks on top of Lightning instead of replacing it.
+_NODE_LIGHTNING_LORA = "89"          # existing Lightning LoraLoaderModelOnly
+_NODE_MODEL_SAMPLING = "66"          # ModelSamplingAuraFlow downstream
+_NODE_USER_LORA = "190"              # injected dynamically — beyond all workflow IDs (max=120)
+_LORAS_DIR = "/ComfyUI/models/loras"
+
+
+def _maybe_authenticated_civitai_url(url):
+    """Civitai download URLs return 401 without ?token=. Auto-append CIVITAI_TOKEN
+    from env (set on the RunPod endpoint template)."""
+    if "civitai.com" not in url:
+        return url
+    if "token=" in url:
+        return url
+    token = os.environ.get("CIVITAI_TOKEN", "").strip()
+    if not token:
+        logger.warning("⚠️  Civitai LoRA URL but CIVITAI_TOKEN env var is empty — download will likely 401")
+        return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}token={token}"
+
+
+def download_lora(lora_url):
+    """Download a LoRA into /ComfyUI/models/loras and return its filename.
+
+    Idempotent: filename is derived from sha1(url) so repeat calls hit the disk
+    cache. Returns just the basename — ComfyUI's LoraLoader resolves it against
+    its loras dir at queue time.
+    """
+    fetch_url = _maybe_authenticated_civitai_url(lora_url)
+    h = hashlib.sha1(lora_url.encode()).hexdigest()[:16]
+    filename = f"user_lora_{h}.safetensors"
+    target = os.path.join(_LORAS_DIR, filename)
+
+    if os.path.exists(target) and os.path.getsize(target) >= 1024 * 1024:
+        logger.info(f"✅ LoRA cache hit: {filename} ({os.path.getsize(target)/(1024*1024):.1f}MB)")
+        return filename
+
+    os.makedirs(_LORAS_DIR, exist_ok=True)
+    # Best-effort cleanup of partial / undersized prior attempts.
+    if os.path.exists(target):
+        os.remove(target)
+
+    logger.info(f"📥 Downloading user LoRA from {lora_url[:80]}…")
+    t0 = time.time()
+    result = subprocess.run(
+        ["wget", "-O", target, "--no-verbose", "--tries=2", "--timeout=120",
+         "--user-agent=kaleipix/1.0", fetch_url],
+        capture_output=True, text=True, timeout=240,
+    )
+    if result.returncode != 0 or not os.path.exists(target):
+        if os.path.exists(target):
+            os.remove(target)
+        raise Exception(f"LoRA download failed (rc={result.returncode}): {result.stderr[:300]}")
+
+    sz = os.path.getsize(target)
+    if sz < 1024 * 1024:
+        # Civitai 401 / HF 403 typically come back as a tiny HTML error page.
+        os.remove(target)
+        raise Exception(f"LoRA download too small ({sz} bytes) — likely auth error or wrong URL")
+
+    logger.info(f"✅ LoRA downloaded: {filename} ({sz/(1024*1024):.1f}MB in {time.time()-t0:.1f}s)")
+    return filename
+
+
+def inject_user_lora(prompt, lora_filename, lora_scale):
+    """Insert a LoraLoaderModelOnly node between the Lightning LoRA (89) and the
+    ModelSamplingAuraFlow (66) so the user LoRA stacks on top of Lightning."""
+    if _NODE_LIGHTNING_LORA not in prompt or _NODE_MODEL_SAMPLING not in prompt:
+        # Workflow shape changed upstream — bail rather than corrupt the graph.
+        raise Exception(
+            f"workflow missing expected LoRA chain nodes "
+            f"({_NODE_LIGHTNING_LORA} or {_NODE_MODEL_SAMPLING})"
+        )
+
+    prompt[_NODE_USER_LORA] = {
+        "inputs": {
+            "lora_name": lora_filename,
+            "strength_model": float(lora_scale),
+            "model": [_NODE_LIGHTNING_LORA, 0],
+        },
+        "class_type": "LoraLoaderModelOnly",
+        "_meta": {"title": "User LoRA"},
+    }
+    prompt[_NODE_MODEL_SAMPLING]["inputs"]["model"] = [_NODE_USER_LORA, 0]
+
 # ------------------------------
 # 입력 처리 유틸 (path/url/base64)
 # ------------------------------
@@ -263,6 +352,19 @@ def handler(job):
         prompt[_NODE_WIDTH]["inputs"]["value"] = job_input["width"]
     if _NODE_HEIGHT in prompt and "height" in job_input:
         prompt[_NODE_HEIGHT]["inputs"]["value"] = job_input["height"]
+
+    # Optional user LoRA — stacks on top of the bundled Lightning LoRA.
+    lora_url = job_input.get("lora_url")
+    if lora_url:
+        lora_scale = job_input.get("lora_scale", 1.0)
+        try:
+            lora_fname = download_lora(lora_url)
+            inject_user_lora(prompt, lora_fname, lora_scale)
+            logger.info(f"🎨 User LoRA applied: {lora_fname} @ scale={lora_scale}")
+        except Exception as e:
+            # Don't fail the whole job — log and continue without LoRA so the
+            # user still gets an output (with a warning) instead of an opaque error.
+            logger.error(f"❌ User LoRA failed, continuing without: {e}")
 
     ws_url = f"ws://{server_address}:8188/ws?clientId={client_id}"
     logger.info(f"Connecting to WebSocket: {ws_url}")
