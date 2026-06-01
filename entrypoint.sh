@@ -69,7 +69,7 @@ echo "Starting ComfyUI in the background..."
 # manifesting as ~50% of fresh workers returning tiny black PNGs regardless
 # of prompt content.
 # Ref: https://github.com/comfyanonymous/ComfyUI/issues/9629
-python /ComfyUI/main.py --listen &
+python /ComfyUI/main.py --listen --extra-model-paths-config /extra_model_paths.yaml &
 
 # Wait for ComfyUI to be ready
 echo "Waiting for ComfyUI to be ready..."

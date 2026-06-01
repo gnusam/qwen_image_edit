@@ -1,0 +1,9 @@
+# Extra model search paths for ComfyUI.
+# Lets ComfyUI find stage-2 (Lustify) models stored on the RunPod network
+# volume mounted at /runpod-volume, IN ADDITION to the Qwen models baked into
+# /ComfyUI/models. Harmless if the volume isn't mounted (paths just won't resolve).
+runpod_volume:
+  base_path: /runpod-volume/
+  checkpoints: checkpoints
+  vae: vae
+  loras: loras

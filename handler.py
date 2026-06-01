@@ -331,12 +331,32 @@ def handler(job):
     if num_images not in _WORKFLOW_FILES:
         return {"error": f"지원하는 이미지 개수는 1, 2, 3개입니다. 입력된 이미지: {num_images}개"}
 
-    workflow_filename = _WORKFLOW_FILES[num_images]
+    # Two-stage NSFW pipeline: Qwen-2511 stages the scene, then a Lustify
+    # SDXL pass refines it img2img (denoise 0.55). Opt-in via `refine` /
+    # `nsfw_refine`; only the 1-image variant exists for now.
+    refine = bool(job_input.get("refine") or job_input.get("nsfw_refine"))
+    if refine and num_images == 1:
+        workflow_filename = "qwen2511_lustify_refine_1image.json"
+    else:
+        workflow_filename = _WORKFLOW_FILES[num_images]
     workflow_path = os.path.join(_WORKFLOW_BASE, workflow_filename)
     if not os.path.exists(workflow_path):
         return {"error": f"워크플로우 파일을 찾을 수 없습니다: {workflow_path}"}
 
     prompt = load_workflow(workflow_path)
+
+    # Optional override of the stage-2 (Lustify) NSFW prompts in refine mode.
+    if refine and num_images == 1:
+        if job_input.get("refine_prompt") and "203" in prompt:
+            prompt["203"]["inputs"]["text"] = job_input["refine_prompt"]
+        if job_input.get("refine_negative") and "204" in prompt:
+            prompt["204"]["inputs"]["text"] = job_input["refine_negative"]
+        if "205" in prompt:
+            try:
+                prompt["205"]["inputs"]["denoise"] = float(
+                    job_input.get("refine_denoise", prompt["205"]["inputs"]["denoise"]))
+            except (TypeError, ValueError):
+                pass
 
     # 노드 번호는 각 워크플로우 JSON과 동일하게 사용
     prompt[_NODE_IMAGE_1]["inputs"]["image"] = image_paths[0]

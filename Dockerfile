@@ -39,6 +39,19 @@ RUN wget -q https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning/resol
 RUN wget -q https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors -O /ComfyUI/models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors 
 RUN wget -q https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors -O /ComfyUI/models/vae/qwen_image_vae.safetensors
 
+# --- Stage 2 (NSFW refine) models: only needed for qwen2511_lustify_refine_*.json ---
+# External SDXL VAE fp16-fix — public, avoids NaN/black output with SDXL checkpoints.
+RUN mkdir -p /ComfyUI/models/checkpoints && \
+    wget -q https://huggingface.co/madebyollin/sdxl-vae-fp16-fix/resolve/main/sdxl_vae.safetensors -O /ComfyUI/models/vae/sdxl_vae_fp16fix.safetensors
+# Lustify checkpoint (stage 2) is NOT baked here:
+#   - APEX V8 is Civitai-only (token must not be committed/baked) → provide it via a
+#     RunPod network volume mounted at /runpod-volume, exposed to ComfyUI through
+#     extra_model_paths.yaml (models/checkpoints/lustifySDXLNSFW_apexV8.safetensors).
+#   - No-token fallback: bake ENDGAME from a public HF mirror instead, and set workflow
+#     node 200 to lustifySDXLNSFW_endgame.safetensors:
+#       RUN wget -q https://huggingface.co/xxxpo13/LUSTIFY_SDXL/resolve/main/lustifySDXLNSFW_endgame.safetensors \
+#           -O /ComfyUI/models/checkpoints/lustifySDXLNSFW_endgame.safetensors
+
 COPY . .
 RUN chmod +x /entrypoint.sh
 
