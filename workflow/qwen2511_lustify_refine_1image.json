@@ -86,7 +86,7 @@
   },
 
   "200": {
-    "inputs": { "ckpt_name": "lustifySDXLNSFW_apexV8.safetensors" },
+    "inputs": { "ckpt_name": "lustifySDXLNSFW_endgame.safetensors" },
     "class_type": "CheckpointLoaderSimple",
     "_meta": { "title": "Lustify V5 checkpoint (stage 2)" }
   },

@@ -43,14 +43,12 @@ RUN wget -q https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/spl
 # External SDXL VAE fp16-fix — public, avoids NaN/black output with SDXL checkpoints.
 RUN mkdir -p /ComfyUI/models/checkpoints && \
     wget -q https://huggingface.co/madebyollin/sdxl-vae-fp16-fix/resolve/main/sdxl_vae.safetensors -O /ComfyUI/models/vae/sdxl_vae_fp16fix.safetensors
-# Lustify checkpoint (stage 2) is NOT baked here:
-#   - APEX V8 is Civitai-only (token must not be committed/baked) → provide it via a
-#     RunPod network volume mounted at /runpod-volume, exposed to ComfyUI through
-#     extra_model_paths.yaml (models/checkpoints/lustifySDXLNSFW_apexV8.safetensors).
-#   - No-token fallback: bake ENDGAME from a public HF mirror instead, and set workflow
-#     node 200 to lustifySDXLNSFW_endgame.safetensors:
-#       RUN wget -q https://huggingface.co/xxxpo13/LUSTIFY_SDXL/resolve/main/lustifySDXLNSFW_endgame.safetensors \
-#           -O /ComfyUI/models/checkpoints/lustifySDXLNSFW_endgame.safetensors
+# Lustify ENDGAME (SDXL NSFW) — single-file checkpoint from a public HF mirror
+# (no Civitai token / age-gate). Baked so refine works standalone (no volume).
+# Filename MUST match workflow node 200. APEX V8 (Civitai) can later be served
+# via a network volume + extra_model_paths.yaml instead, if preferred.
+RUN wget -q https://huggingface.co/xxxpo13/LUSTIFY_SDXL/resolve/main/lustifySDXLNSFW_endgame.safetensors \
+        -O /ComfyUI/models/checkpoints/lustifySDXLNSFW_endgame.safetensors
 
 COPY . .
 RUN chmod +x /entrypoint.sh
