@@ -10,7 +10,7 @@
       "containerDiskInGb": 180,
   
       "gpuCount": 1,
-      "gpuIds": "ADA_24,ADA_32_PRO",
+      "gpuIds": "AMPERE_48,ADA_48_PRO,ADA_24,ADA_32_PRO",
       "allowedCudaVersions": [
         "12.8"
       ]
