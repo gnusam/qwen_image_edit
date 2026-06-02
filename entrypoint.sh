@@ -69,7 +69,21 @@ echo "Starting ComfyUI in the background..."
 # manifesting as ~50% of fresh workers returning tiny black PNGs regardless
 # of prompt content.
 # Ref: https://github.com/comfyanonymous/ComfyUI/issues/9629
-python /ComfyUI/main.py --listen --extra-model-paths-config /extra_model_paths.yaml &
+#
+# Supervise ComfyUI: a one-shot `&` left a crashed ComfyUI (OOM / cold-start
+# failure) dead for the worker's whole life, so EVERY subsequent job failed with
+# "ComfyUI server not running". Respawn it instead — combined with the handler's
+# 180s HTTP-connect retry, a crash recovers in seconds rather than bricking the
+# worker.
+comfy_supervisor() {
+    while true; do
+        echo "[supervisor] launching ComfyUI..."
+        python /ComfyUI/main.py --listen --extra-model-paths-config /extra_model_paths.yaml
+        echo "[supervisor] ComfyUI exited (code $?). Respawning in 3s..."
+        sleep 3
+    done
+}
+comfy_supervisor &
 
 # Wait for ComfyUI to be ready
 echo "Waiting for ComfyUI to be ready..."
