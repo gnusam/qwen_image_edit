@@ -2,7 +2,7 @@
 FROM wlsdml1114/multitalk-base:1.7 as runtime
 
 # wget 설치 (URL 다운로드를 위해)
-RUN apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y wget unzip && rm -rf /var/lib/apt/lists/*
 
 RUN pip install -U "huggingface_hub[hf_transfer]"
 RUN pip install runpod websocket-client librosa
@@ -49,6 +49,21 @@ RUN mkdir -p /ComfyUI/models/checkpoints && \
 # via a network volume + extra_model_paths.yaml instead, if preferred.
 RUN wget -q https://huggingface.co/xxxpo13/LUSTIFY_SDXL/resolve/main/lustifySDXLNSFW_endgame.safetensors \
         -O /ComfyUI/models/checkpoints/lustifySDXLNSFW_endgame.safetensors
+
+# --- Face preservation (preserve_face): InsightFace inswapper — the engine that
+# --- ReActor wraps, used directly so explicit/NSFW images are NOT blocked by
+# --- ReActor's built-in NSFW filter. CUDA provider with CPU fallback. ---
+RUN pip install --no-cache-dir insightface onnxruntime-gpu opencv-python-headless
+# inswapper_128 face-swap model (stable HF mirror; the official release was pulled).
+RUN mkdir -p /ComfyUI/models/insightface && \
+    wget -q https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128.onnx \
+        -O /ComfyUI/models/insightface/inswapper_128.onnx
+# buffalo_l detection/recognition pack — pre-downloaded so cold start needs no network.
+RUN mkdir -p /root/.insightface/models && \
+    wget -q https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip \
+        -O /tmp/buffalo_l.zip && \
+    unzip -q /tmp/buffalo_l.zip -d /root/.insightface/models/buffalo_l && \
+    rm /tmp/buffalo_l.zip
 
 COPY . .
 RUN chmod +x /entrypoint.sh

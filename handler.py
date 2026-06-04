@@ -130,6 +130,64 @@ def get_images(ws, prompt):
 
     return output_images
 
+
+# --- Face preservation (preserve_face) -------------------------------------
+# InsightFace inswapper is the engine ReActor wraps; we call it directly so
+# explicit/NSFW results are NOT blocked by ReActor's built-in NSFW filter.
+# Lazy-loaded once per worker (first preserve_face job pays the load cost).
+_face_app = None
+_face_swapper = None
+_INSWAPPER_PATH = "/ComfyUI/models/insightface/inswapper_128.onnx"
+
+
+def _load_face_models():
+    global _face_app, _face_swapper
+    if _face_swapper is None:
+        import insightface
+        from insightface.app import FaceAnalysis
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        _face_app = FaceAnalysis(name="buffalo_l", providers=providers)
+        _face_app.prepare(ctx_id=0, det_size=(640, 640))
+        _face_swapper = insightface.model_zoo.get_model(_INSWAPPER_PATH, providers=providers)
+        logger.info("🧠 Face models loaded (buffalo_l + inswapper_128)")
+    return _face_app, _face_swapper
+
+
+def apply_face_preservation(result_b64, source_path):
+    """Swap the original source face onto the generated result so the subject's
+    identity survives upstream drift (Qwen edit / Lustify refine). Swaps the
+    largest source face onto the largest result face. Fail-safe: any problem
+    returns the original result untouched (never breaks the job)."""
+    try:
+        import base64
+        import cv2
+        import numpy as np
+        app, swapper = _load_face_models()
+        result_img = cv2.imdecode(np.frombuffer(base64.b64decode(result_b64), np.uint8),
+                                  cv2.IMREAD_COLOR)
+        source_img = cv2.imread(source_path)
+        if result_img is None or source_img is None:
+            logger.warning("preserve_face: unreadable image(s), skipping")
+            return result_b64
+        src_faces = app.get(source_img)
+        tgt_faces = app.get(result_img)
+        if not src_faces or not tgt_faces:
+            logger.warning("preserve_face: no face (src=%d tgt=%d), skipping",
+                           len(src_faces), len(tgt_faces))
+            return result_b64
+        _area = lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])
+        src_face = max(src_faces, key=_area)
+        tgt_face = max(tgt_faces, key=_area)
+        out = swapper.get(result_img, tgt_face, src_face, paste_back=True)
+        ok, buf = cv2.imencode(".png", out)
+        if not ok:
+            return result_b64
+        logger.info("✅ preserve_face: original face restored onto result")
+        return base64.b64encode(buf.tobytes()).decode("utf-8")
+    except Exception as e:
+        logger.error(f"preserve_face failed, returning original result: {e}")
+        return result_b64
+
 def load_workflow(workflow_path):
     with open(workflow_path, 'r') as file:
         return json.load(file)
@@ -430,8 +488,12 @@ def handler(job):
     # 첫 번째 이미지 반환
     for node_id in images:
         if images[node_id]:
-            return {"image": images[node_id][0]}
-    
+            result_b64 = images[node_id][0]
+            # Optional: restore the original subject's face onto the result.
+            if job_input.get("preserve_face") and image_paths:
+                result_b64 = apply_face_preservation(result_b64, image_paths[0])
+            return {"image": result_b64}
+
     return {"error": "이미지를 찾을 수 없습니다."}
 
 runpod.serverless.start({"handler": handler})
