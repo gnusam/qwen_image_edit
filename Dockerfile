@@ -10,13 +10,26 @@ RUN pip install runpod websocket-client librosa
 # Set working directory
 WORKDIR /
 
+# Pinned, deliberately. These used to be bare clones of master, which made the
+# image a function of the day it was built rather than of this repository. The
+# v0.1.6 image (2026-06-02) and the v0.1.8 image (2026-07-30) therefore carried
+# ComfyUI revisions ~100+ commits apart, and v0.1.8 came back with every job
+# failing at `prompt_outputs_failed_validation` on an unchanged workflow. Bump
+# these SHAs on purpose, in their own release, so an upstream break is
+# attributable instead of arriving with an unrelated change.
+ARG COMFYUI_SHA=33799c4a2ee286b5b6b8aac3c45c43245641fb47
+ARG COMFYUI_MANAGER_SHA=2d373448bea60ed793a0fe39ec6ddda94f8cfde3
+ARG KJNODES_SHA=a41e0d85b822ddc4bbd1256417aa2d58d39e94ce
+
 RUN git clone https://github.com/comfyanonymous/ComfyUI.git && \
     cd ComfyUI && \
+    git checkout ${COMFYUI_SHA} && \
     pip install --no-cache-dir -r requirements.txt
 
 RUN cd /ComfyUI/custom_nodes/ && \
     git clone https://github.com/ltdrdata/ComfyUI-Manager.git && \
     cd ComfyUI-Manager && \
+    git checkout ${COMFYUI_MANAGER_SHA} && \
     pip install --no-cache-dir -r requirements.txt
 
 # Disable ComfyUI-Manager network fetches at startup.
@@ -31,6 +44,7 @@ RUN mkdir -p /ComfyUI/user/default/ComfyUI-Manager /ComfyUI/user/__manager && \
 RUN cd /ComfyUI/custom_nodes/ && \
     git clone https://github.com/kijai/ComfyUI-KJNodes && \
     cd ComfyUI-KJNodes && \
+    git checkout ${KJNODES_SHA} && \
     pip install --no-cache-dir -r requirements.txt
 
 # Download models

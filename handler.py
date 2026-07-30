@@ -9,6 +9,7 @@ import uuid
 import logging
 import urllib.request
 import urllib.parse
+import urllib.error
 import binascii # Base64 에러 처리를 위해 import
 import subprocess
 import time
@@ -84,7 +85,20 @@ def queue_prompt(prompt):
     p = {"prompt": prompt, "client_id": client_id}
     data = json.dumps(p).encode('utf-8')
     req = urllib.request.Request(url, data=data)
-    return json.loads(urllib.request.urlopen(req).read())
+    try:
+        return json.loads(urllib.request.urlopen(req).read())
+    except urllib.error.HTTPError as e:
+        # ComfyUI puts the reason the graph was rejected in the response BODY —
+        # which node, which input, what it expected. Letting the HTTPError
+        # propagate discards exactly that, leaving a bare "HTTP Error 400: Bad
+        # Request" and no way to tell a missing model file from a renamed input.
+        # Cost us a full deploy/rollback cycle on 2026-07-30.
+        try:
+            body = e.read().decode("utf-8", "replace")
+        except Exception:
+            body = "<unreadable>"
+        logger.error(f"ComfyUI rejected the prompt ({e.code}): {body}")
+        raise RuntimeError(f"ComfyUI rejected the prompt ({e.code}): {body}") from e
 
 def get_image(filename, subfolder, folder_type):
     url = f"http://{server_address}:8188/view"
