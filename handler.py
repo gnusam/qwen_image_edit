@@ -209,6 +209,7 @@ _NODE_IMAGE_2 = "117"
 _NODE_IMAGE_3 = "119"
 _NODE_SEED = "3"
 _NODE_PROMPT = "111"
+_NODE_NEGATIVE = "110"   # inert while the KSampler runs at cfg=1
 _NODE_WIDTH = "128"   # 현재 워크플로우에는 없음(선택 적용)
 _NODE_HEIGHT = "129"  # 현재 워크플로우에는 없음(선택 적용)
 
@@ -424,6 +425,29 @@ def handler(job):
         prompt[_NODE_IMAGE_3]["inputs"]["image"] = image_paths[2]
 
     prompt[_NODE_PROMPT]["inputs"]["prompt"] = job_input.get("prompt", "")
+
+    # Stage-1 negative conditioning. WARNING: this node only influences the
+    # result when the KSampler runs at cfg > 1. The bundled Lightning LoRA
+    # workflow ships cfg=1, where classifier-free guidance collapses to the
+    # positive branch and anything set here is ignored. Set `cfg` (below) to
+    # make it bite.
+    if _NODE_NEGATIVE in prompt and job_input.get("negative_prompt"):
+        prompt[_NODE_NEGATIVE]["inputs"]["prompt"] = job_input["negative_prompt"]
+
+    # Sampler overrides, deliberately NOT wired to the `steps` / `guidance` keys
+    # the backend already sends: those describe intent for other model families
+    # and honouring them here would silently take every render from 4 steps to
+    # 28 (7x the GPU bill) and from cfg 1 to cfg 4 (burnt output on a 4-step
+    # Lightning LoRA). Opt in explicitly with `sampler_steps` / `cfg`.
+    if _NODE_SEED in prompt:
+        for key, node_input in (("sampler_steps", "steps"), ("cfg", "cfg")):
+            if key in job_input:
+                try:
+                    val = float(job_input[key])
+                    prompt[_NODE_SEED]["inputs"][node_input] = (
+                        int(val) if node_input == "steps" else val)
+                except (TypeError, ValueError):
+                    pass
     if _NODE_SEED in prompt and "seed" in job_input:
         prompt[_NODE_SEED]["inputs"]["seed"] = job_input["seed"]
     if _NODE_WIDTH in prompt and "width" in job_input:
