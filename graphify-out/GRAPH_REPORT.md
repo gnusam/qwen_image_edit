@@ -1,7 +1,7 @@
-# Graph Report - qwen_image_edit_fork  (2026-06-09)
+# Graph Report - qwen_image_edit_fork  (2026-07-30)
 
 ## Corpus Check
-- 16 files · ~181,994 words
+- 16 files · ~182,258 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
@@ -10,7 +10,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `026c5b55`
+- Built from commit: `4f723c6f`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -84,8 +84,8 @@
 5. `inputs` - 11 edges
 6. `input` - 8 edges
 7. `input` - 8 edges
-8. `input` - 7 edges
-9. `handler()` - 7 edges
+8. `handler()` - 7 edges
+9. `input` - 7 edges
 10. `inputs` - 7 edges
 
 ## Surprising Connections (you probably didn't know these)
@@ -346,7 +346,7 @@ _Questions this graph is uniquely positioned to answer:_
   _High betweenness centrality (0.008) - this node is a cross-community bridge._
 - **Why does `inputs` connect `Community 4` to `Community 7`?**
   _High betweenness centrality (0.007) - this node is a cross-community bridge._
-- **What connects `title`, `description`, `type` to the rest of the system?**
+- **What connects `CUDA 사용 가능 여부를 확인하고 환경 변수를 설정합니다.`, `입력 데이터가 Base64 문자열인지 확인하고, 맞다면 파일로 저장 후 경로를 반환합니다.     만약 일반 경로 문자열이라면 그대로 반환합니다`, `Swap the original source face onto the generated result so the subject's     ide` to the rest of the system?**
   _202 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Community 0` be split into smaller, more focused modules?**
   _Cohesion score 0.12333333333333334 - nodes in this community are weakly interconnected._

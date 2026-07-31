@@ -470,16 +470,26 @@ def handler(job):
         prompt[_NODE_HEIGHT]["inputs"]["value"] = job_input["height"]
 
     # Optional user LoRA — stacks on top of the bundled Lightning LoRA.
+    #
+    # `lora_status` travels back in the output. Rendering without the requested
+    # LoRA is a legitimate fallback (better than an opaque failure), but it must
+    # not be silent: the caller stores which LoRA a render used, and a claim
+    # that never happened poisons that record for good.
+    lora_status = {"requested": None, "applied": False, "error": None}
     lora_url = job_input.get("lora_url")
     if lora_url:
+        lora_status["requested"] = lora_url
         lora_scale = job_input.get("lora_scale", 1.0)
         try:
             lora_fname = download_lora(lora_url)
             inject_user_lora(prompt, lora_fname, lora_scale)
+            lora_status["applied"] = True
+            lora_status["scale"] = lora_scale
             logger.info(f"🎨 User LoRA applied: {lora_fname} @ scale={lora_scale}")
         except Exception as e:
             # Don't fail the whole job — log and continue without LoRA so the
             # user still gets an output (with a warning) instead of an opaque error.
+            lora_status["error"] = str(e)[:300]
             logger.error(f"❌ User LoRA failed, continuing without: {e}")
 
     ws_url = f"ws://{server_address}:8188/ws?clientId={client_id}"
@@ -530,7 +540,7 @@ def handler(job):
             # Optional: restore the original subject's face onto the result.
             if job_input.get("preserve_face") and image_paths:
                 result_b64 = apply_face_preservation(result_b64, image_paths[0])
-            return {"image": result_b64}
+            return {"image": result_b64, "lora": lora_status}
 
     return {"error": "이미지를 찾을 수 없습니다."}
 

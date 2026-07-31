@@ -1,7 +1,7 @@
 {
   ".runpod/hub.json": {
-    "mtime": 1780373614.990348,
-    "ast_hash": "ca244f6e37ba09d29a379922c5fbfa8c",
+    "mtime": 1785423741.548498,
+    "ast_hash": "4a0276d9c52028e5ae97262fb227bbe0",
     "semantic_hash": ""
   },
   ".runpod/tests.json": {
@@ -30,8 +30,8 @@
     "semantic_hash": ""
   },
   "handler.py": {
-    "mtime": 1780607061.2415392,
-    "ast_hash": "8b538ced9d72d4f9532ad5c33af060dc",
+    "mtime": 1785436783.6592374,
+    "ast_hash": "771881a58baa326cb7f089a60775f6c1",
     "semantic_hash": ""
   },
   "prewarm.py": {
