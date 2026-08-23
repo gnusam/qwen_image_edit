@@ -72,6 +72,13 @@ RUN pip install --no-cache-dir insightface onnxruntime-gpu opencv-python-headles
 RUN mkdir -p /ComfyUI/models/insightface && \
     wget -q https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128.onnx \
         -O /ComfyUI/models/insightface/inswapper_128.onnx
+# GFPGAN 1.4 (ONNX port, facefusion mirror) — restores each swapped region:
+# inswapper renders faces at 128x128, which reads soft (mouths/teeth) on any
+# face larger than that. The ONNX build runs on the onnxruntime-gpu installed
+# above; the official .pth would drag in basicsr, which no longer imports
+# against current torchvision.
+RUN wget -q https://huggingface.co/facefusion/models-3.0.0/resolve/main/gfpgan_1.4.onnx \
+        -O /ComfyUI/models/insightface/gfpgan_1.4.onnx
 # buffalo_l detection/recognition pack — pre-downloaded so cold start needs no network.
 RUN mkdir -p /root/.insightface/models && \
     wget -q https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip \
