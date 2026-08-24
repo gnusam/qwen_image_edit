@@ -52,6 +52,25 @@ _MIN_DET_SCORE = 0.55
 # so the usable gate range is narrow.
 _MAX_RESTORE_RESIDUAL = 30.0
 
+# Validity gate for a DETECTION (donor or target), same residual metric.
+# SCRFD's det_score does not tell orientations apart: on an upright face the
+# 180-degree view can score HIGHER than the 0-degree view (measured 0.89 vs
+# 0.83) while its keypoints come back inverted (eyes on the chin). Such a
+# candidate poisons everything downstream — an inverted donor turns every
+# swap of the batch into a smeared "new face". Measured on production
+# images: correct keypoints fit the FFHQ template at 4-21, inverted or
+# collinear ones at 32-85. Candidates above the gate are discarded before
+# the per-face dedup, so the best VALID orientation wins.
+_MAX_KPS_RESIDUAL = 25.0
+
+# Minimum donor/target ArcFace cosine for a swap to happen at all. This gate
+# only has to catch garbage: with sane keypoints on both sides the same
+# person measures 0.5-0.9, and even a render where Qwen drifted the identity
+# (exactly when the swap matters most) still measures 0.31-0.35, while a
+# garbage embedding or a face already destroyed measures -0.01..0.18.
+# Below this the swap can only destroy the face Qwen already rendered.
+_MIN_SWAP_SIM = 0.25
+
 # Share of the GFPGAN output blended over the swapped region. 1.0 looks
 # slightly plastic; keeping a trace of the inswapper texture reads more
 # photographic (facefusion ships 0.8 for this same model).
@@ -121,6 +140,17 @@ def _iou(a, b):
     return inter / (area(a) + area(b) - inter + 1e-6)
 
 
+def _kps_residual(kps):
+    """Similarity-fit the 5 keypoints onto the FFHQ template. Returns the
+    2x3 affine (or None) and the mean 512-scale reprojection error."""
+    matrix, _ = cv2.estimateAffinePartial2D(kps, _FFHQ_512, method=cv2.RANSAC,
+                                            ransacReprojThreshold=100)
+    if matrix is None:
+        return None, float("inf")
+    proj = kps @ matrix[:, :2].T + matrix[:, 2]
+    return matrix, float(np.mean(np.linalg.norm(proj - _FFHQ_512, axis=1)))
+
+
 def _map_back(face, rot, w, h):
     """Map a face detected on a rotated view back to original-image
     coordinates (w, h = ORIGINAL image size). Keypoint semantics (left eye,
@@ -151,15 +181,27 @@ def _detect_faces(app, img):
     detection per face."""
     h, w = img.shape[:2]
     found = []
-    for rot in (None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180,
-                cv2.ROTATE_90_COUNTERCLOCKWISE):
+    for rot, name in ((None, 0), (cv2.ROTATE_90_CLOCKWISE, 90),
+                      (cv2.ROTATE_180, 180),
+                      (cv2.ROTATE_90_COUNTERCLOCKWISE, 270)):
         view = img if rot is None else cv2.rotate(img, rot)
         for face in app.get(view):
             if float(face.det_score) < _MIN_DET_SCORE:
                 continue
             _map_back(face, rot, w, h)
+            _, residual = _kps_residual(face.kps)
+            face.rot, face.residual = name, residual
+            if residual > _MAX_KPS_RESIDUAL:
+                logger.debug("preserve_face: dropped rot=%d score=%.2f "
+                             "residual=%.0f (inverted/degenerate keypoints)",
+                             name, float(face.det_score), residual)
+                continue
             found.append(face)
-    found.sort(key=lambda f: float(f.det_score), reverse=True)
+    # Among valid candidates prefer confidence, but let a cleaner keypoint
+    # fit break near-ties: two orientations of the same face often score
+    # within 0.05 of each other.
+    found.sort(key=lambda f: float(f.det_score) - f.residual / 100.0,
+               reverse=True)
     kept = []
     for f in found:
         if all(_iou(f.bbox, k.bbox) < 0.4 for k in kept):
@@ -220,18 +262,16 @@ def _match_faces(targets, donors):
 
 
 def _restore_region(img, kps, session):
-    """Re-render one face region through GFPGAN and feather it back in."""
-    matrix, _ = cv2.estimateAffinePartial2D(kps, _FFHQ_512, method=cv2.RANSAC,
-                                            ransacReprojThreshold=100)
+    """Re-render one face region through GFPGAN and feather it back in.
+    Returns (image, restored_flag)."""
+    matrix, residual = _kps_residual(kps)
     if matrix is None:
-        return img
-    proj = kps @ matrix[:, :2].T + matrix[:, 2]
-    residual = float(np.mean(np.linalg.norm(proj - _FFHQ_512, axis=1)))
+        return img, False
     if residual > _MAX_RESTORE_RESIDUAL:
         logger.warning("preserve_face: restore skipped, alignment residual "
                        "%.0f > %.0f (extreme pose)", residual,
                        _MAX_RESTORE_RESIDUAL)
-        return img
+        return img, False
     crop = cv2.warpAffine(img, matrix, (512, 512),
                           borderMode=cv2.BORDER_REPLICATE)
     inp = crop[:, :, ::-1].astype(np.float32) / 255.0  # BGR -> RGB
@@ -258,15 +298,16 @@ def _restore_region(img, kps, session):
                            borderMode=cv2.BORDER_REPLICATE)
     paste_mask = np.clip(cv2.warpAffine(mask, inverse, (w, h)), 0.0, 1.0)
     paste_mask = paste_mask[:, :, None]
-    return (paste_mask * paste.astype(np.float32)
-            + (1.0 - paste_mask) * img.astype(np.float32)).astype(np.uint8)
+    out = (paste_mask * paste.astype(np.float32)
+           + (1.0 - paste_mask) * img.astype(np.float32)).astype(np.uint8)
+    return out, True
 
 
 def apply_face_preservation(result_b64, source_paths):
     """Swap each original face onto its matching face in the generated result,
     then restore the swapped regions. Returns (b64, status_dict)."""
     status = {"applied": False, "swapped": 0, "restored": 0,
-              "donors": 0, "targets": 0}
+              "skipped": 0, "donors": 0, "targets": 0}
     try:
         app, swapper = _load_face_models()
         img = cv2.imdecode(
@@ -285,16 +326,30 @@ def apply_face_preservation(result_b64, source_paths):
             logger.warning("preserve_face: %s, skipping", status["error"])
             return result_b64, status
         restorer = _load_restorer()
+        for d in donors:
+            logger.info("preserve_face: donor rot=%d score=%.2f residual=%.0f",
+                        d.rot, float(d.det_score), d.residual)
         for target, donor, sim in _match_faces(targets, donors):
+            if sim < _MIN_SWAP_SIM:
+                status["skipped"] += 1
+                logger.warning("preserve_face: swap skipped, sim=%.2f < %.2f "
+                               "(target rot=%d score=%.2f residual=%.0f)",
+                               sim, _MIN_SWAP_SIM, target.rot,
+                               float(target.det_score), target.residual)
+                continue
             img = swapper.get(img, target, donor, paste_back=True)
             status["swapped"] += 1
+            restored = False
             if restorer is not None:
                 try:
-                    img = _restore_region(img, target.kps, restorer)
-                    status["restored"] += 1
+                    img, restored = _restore_region(img, target.kps, restorer)
                 except Exception as e:
                     logger.error(f"preserve_face: restore failed on one face: {e}")
-            logger.info("preserve_face: swapped face (sim=%.2f)", sim)
+            status["restored"] += int(restored)
+            logger.info("preserve_face: swapped face (sim=%.2f, target rot=%d "
+                        "score=%.2f residual=%.0f, restored=%s)", sim,
+                        target.rot, float(target.det_score), target.residual,
+                        restored)
         ok, buf = cv2.imencode(".png", img)
         if not ok:
             status["error"] = "png encode failed"
