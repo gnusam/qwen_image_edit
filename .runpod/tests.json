@@ -8,7 +8,7 @@
         "seed": 12345,
         "preserve_face": true
       },
-      "timeout": 600000
+      "timeout": 1800000
     }
   ],
   "config": {

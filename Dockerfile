@@ -47,44 +47,24 @@ RUN cd /ComfyUI/custom_nodes/ && \
     git checkout ${KJNODES_SHA} && \
     pip install --no-cache-dir -r requirements.txt
 
-# Download models
-RUN wget -q https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI/resolve/main/split_files/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors -O /ComfyUI/models/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors
-RUN wget -q https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning/resolve/main/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors -O /ComfyUI/models/loras/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors
-RUN wget -q https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors -O /ComfyUI/models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors 
-RUN wget -q https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors -O /ComfyUI/models/vae/qwen_image_vae.safetensors
-
-# --- Stage 2 (NSFW refine) models: only needed for qwen2511_lustify_refine_*.json ---
-# External SDXL VAE fp16-fix — public, avoids NaN/black output with SDXL checkpoints.
-RUN mkdir -p /ComfyUI/models/checkpoints && \
-    wget -q https://huggingface.co/madebyollin/sdxl-vae-fp16-fix/resolve/main/sdxl_vae.safetensors -O /ComfyUI/models/vae/sdxl_vae_fp16fix.safetensors
-# Lustify ENDGAME (SDXL NSFW) — single-file checkpoint from a public HF mirror
-# (no Civitai token / age-gate). Baked so refine works standalone (no volume).
-# Filename MUST match workflow node 200. APEX V8 (Civitai) can later be served
-# via a network volume + extra_model_paths.yaml instead, if preferred.
-RUN wget -q https://huggingface.co/xxxpo13/LUSTIFY_SDXL/resolve/main/lustifySDXLNSFW_endgame.safetensors \
-        -O /ComfyUI/models/checkpoints/lustifySDXLNSFW_endgame.safetensors
+# --- Models are NOT baked into the image any more. ---
+# ~40 GB of weights (Qwen edit fp8, Qwen2.5-VL encoder, Lustify, VAEs,
+# inswapper, GFPGAN, buffalo_l) used to be wget'ed here, which made a cold
+# build ~30 min — RunPod Hub's hard limit — and every worker pull 46 GB.
+# /ensure_models.py now fetches them at container start onto the endpoint's
+# network volume (once, lock-protected) or the container disk when no volume
+# is mounted, and symlinks them into the paths below. The manifest with URLs
+# and exact sizes lives in that script.
+RUN mkdir -p /ComfyUI/models/diffusion_models /ComfyUI/models/text_encoders \
+             /ComfyUI/models/vae /ComfyUI/models/loras /ComfyUI/models/checkpoints \
+             /ComfyUI/models/insightface /root/.insightface/models
 
 # --- Face preservation (preserve_face): InsightFace inswapper — the engine that
 # --- ReActor wraps, used directly so explicit/NSFW images are NOT blocked by
-# --- ReActor's built-in NSFW filter. CUDA provider with CPU fallback. ---
+# --- ReActor's built-in NSFW filter. GFPGAN restore runs as ONNX on the same
+# --- onnxruntime (the .pth release would drag in basicsr, which no longer
+# --- imports against current torchvision). CUDA provider with CPU fallback.
 RUN pip install --no-cache-dir insightface onnxruntime-gpu opencv-python-headless
-# inswapper_128 face-swap model (stable HF mirror; the official release was pulled).
-RUN mkdir -p /ComfyUI/models/insightface && \
-    wget -q https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128.onnx \
-        -O /ComfyUI/models/insightface/inswapper_128.onnx
-# GFPGAN 1.4 (ONNX port, facefusion mirror) — restores each swapped region:
-# inswapper renders faces at 128x128, which reads soft (mouths/teeth) on any
-# face larger than that. The ONNX build runs on the onnxruntime-gpu installed
-# above; the official .pth would drag in basicsr, which no longer imports
-# against current torchvision.
-RUN wget -q https://huggingface.co/facefusion/models-3.0.0/resolve/main/gfpgan_1.4.onnx \
-        -O /ComfyUI/models/insightface/gfpgan_1.4.onnx
-# buffalo_l detection/recognition pack — pre-downloaded so cold start needs no network.
-RUN mkdir -p /root/.insightface/models && \
-    wget -q https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip \
-        -O /tmp/buffalo_l.zip && \
-    unzip -q /tmp/buffalo_l.zip -d /root/.insightface/models/buffalo_l && \
-    rm /tmp/buffalo_l.zip
 
 COPY . .
 RUN chmod +x /entrypoint.sh

@@ -61,6 +61,13 @@ fi
 # CUDA 환경 변수 설정
 echo "Using CUDA device: $CUDA_VISIBLE_DEVICES"
 
+# Make sure every weight is present before ComfyUI scans its model folders.
+# On the endpoint this hits the network volume (first worker ever downloads
+# ~40 GB once, later starts find everything); without a volume (Hub test pod,
+# local run) it downloads to the container disk.
+echo "Ensuring models..."
+python /ensure_models.py
+
 # Start ComfyUI in the background
 echo "Starting ComfyUI in the background..."
 # NOTE: --use-sage-attention removed due to incompatibility with Qwen models.
