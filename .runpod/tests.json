@@ -1,5 +1,16 @@
 {
-  "tests": [],
+  "tests": [
+    {
+      "name": "edit_with_preserve_face",
+      "input": {
+        "prompt": "turn the background into a sunny beach, keep the person unchanged",
+        "image_url": "https://raw.githubusercontent.com/gnusam/qwen_image_edit/main/examples/input/test_input.png",
+        "seed": 12345,
+        "preserve_face": true
+      },
+      "timeout": 600000
+    }
+  ],
   "config": {
     "gpuTypeIds": ["NVIDIA GeForce RTX 4090"],
     "allowedCudaVersions": ["12.8"]
