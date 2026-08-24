@@ -38,6 +38,20 @@ _GFPGAN_PATH = "/ComfyUI/models/insightface/gfpgan_1.4.onnx"
 # people ~0.0-0.3.
 _CLUSTER_SIM = 0.45
 
+# Detections below this confidence are dropped: SCRFD false positives (a knee,
+# a hand) score ~0.3-0.5, real faces in their best orientation ~0.65-0.95.
+# Swapping onto a non-face is how "monstrous" artifacts happen — skipping is
+# always the safer failure.
+_MIN_DET_SCORE = 0.55
+
+# Mean 512-scale reprojection error of the 5 keypoints onto the FFHQ template
+# above which the GFPGAN pass is skipped: the crop would be misaligned and the
+# "restore" would sharpen garbage. The swap itself is kept. Calibration:
+# frontal/moderate poses fit at ~5-20, while fully degenerate keypoints
+# (collinear) still reach ~47 because the similarity fit can shrink its scale,
+# so the usable gate range is narrow.
+_MAX_RESTORE_RESIDUAL = 30.0
+
 # Share of the GFPGAN output blended over the swapped region. 1.0 looks
 # slightly plastic; keeping a trace of the inswapper texture reads more
 # photographic (facefusion ships 0.8 for this same model).
@@ -97,6 +111,62 @@ def _quality(face):
     return float(face.det_score) * float(np.sqrt(_area(face)))
 
 
+def _iou(a, b):
+    x1, y1 = max(a[0], b[0]), max(a[1], b[1])
+    x2, y2 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    if inter <= 0.0:
+        return 0.0
+    area = lambda r: max(0.0, r[2] - r[0]) * max(0.0, r[3] - r[1])
+    return inter / (area(a) + area(b) - inter + 1e-6)
+
+
+def _map_back(face, rot, w, h):
+    """Map a face detected on a rotated view back to original-image
+    coordinates (w, h = ORIGINAL image size). Keypoint semantics (left eye,
+    right eye, ...) are preserved, so downstream similarity alignment
+    naturally includes the rotation."""
+    if rot is None:
+        return
+    def back(pts):
+        u, v = pts[:, 0], pts[:, 1]
+        if rot == cv2.ROTATE_90_CLOCKWISE:
+            return np.stack([v, h - 1 - u], axis=1)
+        if rot == cv2.ROTATE_180:
+            return np.stack([w - 1 - u, h - 1 - v], axis=1)
+        return np.stack([w - 1 - v, u], axis=1)  # ROTATE_90_COUNTERCLOCKWISE
+    face.kps = back(face.kps).astype(np.float32)
+    x1, y1, x2, y2 = face.bbox[:4]
+    c = back(np.array([[x1, y1], [x2, y2]], np.float32))
+    face.bbox = np.array([c[:, 0].min(), c[:, 1].min(),
+                          c[:, 0].max(), c[:, 1].max()], np.float32)
+
+
+def _detect_faces(app, img):
+    """Rotation-TTA detection. SCRFD is not rotation-invariant: on a heavily
+    rotated face (a person lying down reads as upside-down) it either misses
+    the face or lands the keypoints inverted (eyes on the chin), which poisons
+    everything downstream — alignment, embedding, swap, restore. Detect on all
+    four 90-degree orientations, map results back, keep the best-scored
+    detection per face."""
+    h, w = img.shape[:2]
+    found = []
+    for rot in (None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180,
+                cv2.ROTATE_90_COUNTERCLOCKWISE):
+        view = img if rot is None else cv2.rotate(img, rot)
+        for face in app.get(view):
+            if float(face.det_score) < _MIN_DET_SCORE:
+                continue
+            _map_back(face, rot, w, h)
+            found.append(face)
+    found.sort(key=lambda f: float(f.det_score), reverse=True)
+    kept = []
+    for f in found:
+        if all(_iou(f.bbox, k.bbox) < 0.4 for k in kept):
+            kept.append(f)
+    return kept
+
+
 def _collect_donors(app, source_paths):
     """Detect faces in every source image and cluster them by identity.
     Returns one representative Face per person, its embedding replaced by the
@@ -107,7 +177,7 @@ def _collect_donors(app, source_paths):
         if img is None:
             logger.warning("preserve_face: unreadable source %s, skipping", path)
             continue
-        for face in app.get(img):
+        for face in _detect_faces(app, img):
             emb = face.normed_embedding
             best, best_sim = None, _CLUSTER_SIM
             for c in clusters:
@@ -155,6 +225,13 @@ def _restore_region(img, kps, session):
                                             ransacReprojThreshold=100)
     if matrix is None:
         return img
+    proj = kps @ matrix[:, :2].T + matrix[:, 2]
+    residual = float(np.mean(np.linalg.norm(proj - _FFHQ_512, axis=1)))
+    if residual > _MAX_RESTORE_RESIDUAL:
+        logger.warning("preserve_face: restore skipped, alignment residual "
+                       "%.0f > %.0f (extreme pose)", residual,
+                       _MAX_RESTORE_RESIDUAL)
+        return img
     crop = cv2.warpAffine(img, matrix, (512, 512),
                           borderMode=cv2.BORDER_REPLICATE)
     inp = crop[:, :, ::-1].astype(np.float32) / 255.0  # BGR -> RGB
@@ -200,7 +277,7 @@ def apply_face_preservation(result_b64, source_paths):
             logger.warning("preserve_face: unreadable result image, skipping")
             return result_b64, status
         donors = _collect_donors(app, source_paths)
-        targets = app.get(img)
+        targets = _detect_faces(app, img)
         status["donors"], status["targets"] = len(donors), len(targets)
         if not donors or not targets:
             status["error"] = ("no face detected (donors=%d targets=%d)"
