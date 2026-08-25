@@ -486,9 +486,17 @@ def handler(job):
             result_b64 = images[node_id][0]
             # Optional: restore the original subject's face(s) onto the result.
             if job_input.get("preserve_face") and image_paths:
+                raw_b64 = result_b64
                 result_b64, face_status = apply_face_preservation(result_b64, image_paths)
-                return {"image": result_b64, "lora": lora_status,
-                        "preserve_face": face_status}
+                out = {"image": result_b64, "lora": lora_status,
+                       "preserve_face": face_status}
+                # Ship the untouched render alongside the swapped one so the
+                # client can keep both side by side and the user can judge
+                # which face is right. Only when a swap actually happened —
+                # otherwise the two would be byte-identical.
+                if face_status.get("applied"):
+                    out["image_raw"] = raw_b64
+                return out
             return {"image": result_b64, "lora": lora_status}
 
     return {"error": "이미지를 찾을 수 없습니다."}
