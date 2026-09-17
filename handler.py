@@ -487,14 +487,21 @@ def handler(job):
             # Optional: restore the original subject's face(s) onto the result.
             if job_input.get("preserve_face") and image_paths:
                 raw_b64 = result_b64
-                result_b64, face_status = apply_face_preservation(result_b64, image_paths)
+                # `face_sim_min` lowers the identity floor for this job only.
+                # The two-stage (refine) pipeline sends it because its SDXL pass
+                # repaints the face past the default floor every time; a plain
+                # one-stage job sends nothing and keeps the trusted threshold.
+                result_b64, face_status = apply_face_preservation(
+                    result_b64, image_paths, sim_min=job_input.get("face_sim_min"))
                 out = {"image": result_b64, "lora": lora_status,
                        "preserve_face": face_status}
                 # Ship the untouched render alongside the swapped one so the
                 # client can keep both side by side and the user can judge
                 # which face is right. Only when a swap actually happened —
-                # otherwise the two would be byte-identical.
-                if face_status.get("applied"):
+                # otherwise the two would be byte-identical — and only when the
+                # caller asked for it: when the swap is trusted, the raw twin is
+                # sorting work rather than a choice.
+                if face_status.get("applied") and job_input.get("keep_raw", True):
                     out["image_raw"] = raw_b64
                 return out
             return {"image": result_b64, "lora": lora_status}

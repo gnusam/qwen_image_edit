@@ -303,11 +303,20 @@ def _restore_region(img, kps, session):
     return out, True
 
 
-def apply_face_preservation(result_b64, source_paths):
+def apply_face_preservation(result_b64, source_paths, sim_min=None):
     """Swap each original face onto its matching face in the generated result,
-    then restore the swapped regions. Returns (b64, status_dict)."""
+    then restore the swapped regions. Returns (b64, status_dict).
+
+    `sim_min` overrides the identity floor for this job. The default (None ->
+    _MIN_SWAP_SIM) is what the one-stage Qwen workflow relies on and must stay
+    as it is. A two-stage job (Qwen staged, then an SDXL img2img pass) repaints
+    the face hard enough that the source-to-render similarity lands under that
+    floor every time, so it passes a lower one — and keeps the untouched render
+    alongside, because a forced swap is exactly the one the user must arbitrate.
+    """
+    floor = _MIN_SWAP_SIM if sim_min is None else float(sim_min)
     status = {"applied": False, "swapped": 0, "restored": 0,
-              "skipped": 0, "donors": 0, "targets": 0}
+              "skipped": 0, "donors": 0, "targets": 0, "sim_min": floor}
     try:
         app, swapper = _load_face_models()
         img = cv2.imdecode(
@@ -330,11 +339,11 @@ def apply_face_preservation(result_b64, source_paths):
             logger.info("preserve_face: donor rot=%d score=%.2f residual=%.0f",
                         d.rot, float(d.det_score), d.residual)
         for target, donor, sim in _match_faces(targets, donors):
-            if sim < _MIN_SWAP_SIM:
+            if sim < floor:
                 status["skipped"] += 1
                 logger.warning("preserve_face: swap skipped, sim=%.2f < %.2f "
                                "(target rot=%d score=%.2f residual=%.0f)",
-                               sim, _MIN_SWAP_SIM, target.rot,
+                               sim, floor, target.rot,
                                float(target.det_score), target.residual)
                 continue
             img = swapper.get(img, target, donor, paste_back=True)
@@ -346,6 +355,7 @@ def apply_face_preservation(result_b64, source_paths):
                 except Exception as e:
                     logger.error(f"preserve_face: restore failed on one face: {e}")
             status["restored"] += int(restored)
+            status["sim"] = round(float(sim), 3)
             logger.info("preserve_face: swapped face (sim=%.2f, target rot=%d "
                         "score=%.2f residual=%.0f, restored=%s)", sim,
                         target.rot, float(target.det_score), target.residual,
