@@ -332,6 +332,61 @@ def _restore_region(img, kps, session):
     return out, True
 
 
+def keep_stage_faces(result_b64, stage_b64):
+    """Paste the faces of the stage-1 (Qwen) image back over the refined one.
+
+    The refine pass is an SDXL img2img at denoise 0.55 over the whole frame:
+    it redraws every face, and the identity similarity to the source drops to
+    about 0 — at which point no swap can be trusted to find who is who. Qwen's
+    faces still carry the identity (0.3-0.9 measured), so the refine keeps the
+    body and the faces come back from stage 1, feathered to hide the seam.
+    Both images share their geometry: the refine encodes the stage-1 decode.
+    Returns (b64, status)."""
+    status = {"kept": 0}
+    try:
+        app, _ = _load_face_models()
+        dec = lambda b: cv2.imdecode(np.frombuffer(base64.b64decode(b), np.uint8),
+                                     cv2.IMREAD_COLOR)
+        res, st = dec(result_b64), dec(stage_b64)
+        if res is None or st is None:
+            status["error"] = "unreadable image"
+            return result_b64, status
+        h, w = res.shape[:2]
+        if st.shape[:2] != (h, w):
+            st = cv2.resize(st, (w, h), interpolation=cv2.INTER_AREA)
+        faces = _detect_faces(app, st)
+        if not faces:
+            status["error"] = "no face in stage-1 image"
+            return result_b64, status
+        mask = np.zeros((h, w), np.float32)
+        smallest = float("inf")
+        for f in faces:
+            x1, y1, x2, y2 = [float(v) for v in f.bbox[:4]]
+            fw, fh = x2 - x1, y2 - y1
+            # Ellipse a bit larger than the detector box: forehead and chin
+            # sit outside SCRFD's box, and a seam across them shows.
+            centre = (int((x1 + x2) / 2), int((y1 + y2) / 2 - 0.05 * fh))
+            axes = (max(1, int(0.62 * fw)), max(1, int(0.78 * fh)))
+            cv2.ellipse(mask, centre, axes, 0, 0, 360, 1.0, -1)
+            smallest = min(smallest, fw, fh)
+            status["kept"] += 1
+        # Feather sized on the smallest face, so a small one keeps its shape.
+        k = max(3, int(0.25 * smallest) | 1)
+        mask = cv2.GaussianBlur(mask, (k, k), 0)[:, :, None]
+        out = (st.astype(np.float32) * mask + res.astype(np.float32) * (1.0 - mask))
+        ok, buf = cv2.imencode(".png", np.clip(out, 0, 255).astype(np.uint8))
+        if not ok:
+            status["error"] = "png encode failed"
+            return result_b64, status
+        logger.info("keep_stage_faces: %d stage-1 face(s) pasted over the refine",
+                    status["kept"])
+        return base64.b64encode(buf.tobytes()).decode("utf-8"), status
+    except Exception as e:
+        logger.error(f"keep_stage_faces failed, keeping the refined faces: {e}")
+        status["error"] = str(e)[:300]
+        return result_b64, status
+
+
 def apply_face_preservation(result_b64, source_paths, sim_min=None):
     """Swap each original face onto its matching face in the generated result,
     then restore the swapped regions. Returns (b64, status_dict).

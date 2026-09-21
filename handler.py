@@ -147,7 +147,7 @@ def get_images(ws, prompt):
 
 # --- Face preservation (preserve_face) -------------------------------------
 # Identity-matched multi-face swap + GFPGAN restore; lives in face_preserve.py.
-from face_preserve import apply_face_preservation
+from face_preserve import apply_face_preservation, keep_stage_faces
 
 def load_workflow(workflow_path):
     with open(workflow_path, 'r') as file:
@@ -180,6 +180,9 @@ _NODE_HEIGHT = "129"  # 현재 워크플로우에는 없음(선택 적용)
 _NODE_LIGHTNING_LORA = "89"          # existing Lightning LoraLoaderModelOnly
 _NODE_MODEL_SAMPLING = "66"          # ModelSamplingAuraFlow downstream
 _NODE_USER_LORA = "190"              # injected dynamically — beyond all workflow IDs (max=120)
+_NODE_USER_LORA_2 = "191"            # optional second user LoRA, chained after 190
+_NODE_FINAL_IMAGE = "60"             # SaveImage of the final render in every workflow
+_NODE_STAGE1_IMAGE = "61"            # refine workflow only: Qwen image before the SDXL pass
 _LORAS_DIR = "/ComfyUI/models/loras"
 
 
@@ -241,9 +244,10 @@ def download_lora(lora_url):
     return filename
 
 
-def inject_user_lora(prompt, lora_filename, lora_scale):
-    """Insert a LoraLoaderModelOnly node between the Lightning LoRA (89) and the
-    ModelSamplingAuraFlow (66) so the user LoRA stacks on top of Lightning."""
+def inject_user_lora(prompt, lora_filename, lora_scale, node_id=_NODE_USER_LORA):
+    """Insert a LoraLoaderModelOnly node just before the ModelSamplingAuraFlow
+    (66), after whatever already feeds it: the Lightning LoRA (89) for the
+    first user LoRA, that one for a second. Each call stacks one more."""
     if _NODE_LIGHTNING_LORA not in prompt or _NODE_MODEL_SAMPLING not in prompt:
         # Workflow shape changed upstream — bail rather than corrupt the graph.
         raise Exception(
@@ -251,16 +255,16 @@ def inject_user_lora(prompt, lora_filename, lora_scale):
             f"({_NODE_LIGHTNING_LORA} or {_NODE_MODEL_SAMPLING})"
         )
 
-    prompt[_NODE_USER_LORA] = {
+    prompt[node_id] = {
         "inputs": {
             "lora_name": lora_filename,
             "strength_model": float(lora_scale),
-            "model": [_NODE_LIGHTNING_LORA, 0],
+            "model": prompt[_NODE_MODEL_SAMPLING]["inputs"]["model"],
         },
         "class_type": "LoraLoaderModelOnly",
-        "_meta": {"title": "User LoRA"},
+        "_meta": {"title": f"User LoRA {node_id}"},
     }
-    prompt[_NODE_MODEL_SAMPLING]["inputs"]["model"] = [_NODE_USER_LORA, 0]
+    prompt[_NODE_MODEL_SAMPLING]["inputs"]["model"] = [node_id, 0]
 
 # ------------------------------
 # 입력 처리 유틸 (path/url/base64)
@@ -439,6 +443,21 @@ def handler(job):
             lora_status["error"] = str(e)[:300]
             logger.error(f"❌ User LoRA failed, continuing without: {e}")
 
+    # Optional second user LoRA (e.g. an anti-drift LoRA next to an NSFW one),
+    # reported apart so the caller can tell which of the two made it in.
+    lora2_url = job_input.get("lora_url_2")
+    if lora2_url:
+        lora_status["second"] = {"requested": lora2_url, "applied": False, "error": None}
+        try:
+            fname2 = download_lora(lora2_url)
+            scale2 = job_input.get("lora_scale_2", 1.0)
+            inject_user_lora(prompt, fname2, scale2, node_id=_NODE_USER_LORA_2)
+            lora_status["second"].update(applied=True, scale=scale2)
+            logger.info(f"🎨 Second user LoRA applied: {fname2} @ scale={scale2}")
+        except Exception as e:
+            lora_status["second"]["error"] = str(e)[:300]
+            logger.error(f"❌ Second user LoRA failed, continuing without: {e}")
+
     ws_url = f"ws://{server_address}:8188/ws?clientId={client_id}"
     logger.info(f"Connecting to WebSocket: {ws_url}")
     
@@ -480,10 +499,20 @@ def handler(job):
     if not images:
         return {"error": "이미지를 생성할 수 없습니다."}
     
-    # 첫 번째 이미지 반환
-    for node_id in images:
+    # The final render is node 60 in every workflow. The refine workflow also
+    # saves its stage-1 image (61): never let dict order hand that one back.
+    final_nodes = [_NODE_FINAL_IMAGE] if images.get(_NODE_FINAL_IMAGE) else list(images)
+    stage1 = (images.get(_NODE_STAGE1_IMAGE) or [None])[0]
+    for node_id in final_nodes:
+        if node_id == _NODE_STAGE1_IMAGE:
+            continue
         if images[node_id]:
             result_b64 = images[node_id][0]
+            refine_faces = None
+            # Refine: the SDXL pass redraws the faces past recognition; put
+            # the Qwen faces back unless the caller opts out.
+            if refine and stage1 and job_input.get("refine_keep_face", True):
+                result_b64, refine_faces = keep_stage_faces(result_b64, stage1)
             # Optional: restore the original subject's face(s) onto the result.
             if job_input.get("preserve_face") and image_paths:
                 raw_b64 = result_b64
@@ -495,6 +524,8 @@ def handler(job):
                     result_b64, image_paths, sim_min=job_input.get("face_sim_min"))
                 out = {"image": result_b64, "lora": lora_status,
                        "preserve_face": face_status}
+                if refine_faces is not None:
+                    out["refine_faces"] = refine_faces
                 # Ship the untouched render alongside the swapped one so the
                 # client can keep both side by side and the user can judge
                 # which face is right. Only when a swap actually happened —
@@ -504,7 +535,10 @@ def handler(job):
                 if face_status.get("applied") and job_input.get("keep_raw", True):
                     out["image_raw"] = raw_b64
                 return out
-            return {"image": result_b64, "lora": lora_status}
+            out = {"image": result_b64, "lora": lora_status}
+            if refine_faces is not None:
+                out["refine_faces"] = refine_faces
+            return out
 
     return {"error": "이미지를 찾을 수 없습니다."}
 
