@@ -220,6 +220,7 @@ def _collect_donors(app, source_paths):
             logger.warning("preserve_face: unreadable source %s, skipping", path)
             continue
         for face in _detect_faces(app, img):
+            _set_pos(face, img)
             emb = face.normed_embedding
             best, best_sim = None, _CLUSTER_SIM
             for c in clusters:
@@ -242,23 +243,51 @@ def _collect_donors(app, source_paths):
     return donors
 
 
-def _match_faces(targets, donors):
-    """Greedy one-to-one assignment of result faces to donor identities by
-    embedding similarity. Leftover result faces stay untouched."""
-    pairs = []
+def _set_pos(face, img):
+    """Face centre in image-relative coordinates (0..1), so a source and a
+    render of different sizes can be compared."""
+    h, w = img.shape[:2]
+    x1, y1, x2, y2 = face.bbox[:4]
+    face.pos = (float(x1 + x2) / 2.0 / w, float(y1 + y2) / 2.0 / h)
+
+
+def _match_faces(targets, donors, by_position=False):
+    """Greedy one-to-one assignment of result faces to donor identities.
+    Leftover result faces stay untouched. Returns (target, donor, sim).
+
+    By embedding similarity when identities can be read. When they cannot —
+    every pair under _MIN_SWAP_SIM, which is what a two-stage render does to
+    faces — similarity is noise and the pairing is a coin toss: with two
+    people it swapped their faces half the time. The render keeps the
+    source's composition, so `by_position` pairs faces by where they are
+    (nearest image-relative centre) instead. Only meaningful with a single
+    source image; the caller decides. Returns (matches, "identity"|"position")."""
+    sims = {}
     for ti, t in enumerate(targets):
         for di, d in enumerate(donors):
-            sim = float(np.dot(t.normed_embedding, d.normed_embedding))
-            pairs.append((sim, ti, di))
-    pairs.sort(reverse=True)
+            sims[ti, di] = float(np.dot(t.normed_embedding, d.normed_embedding))
+    identity_readable = any(v >= _MIN_SWAP_SIM for v in sims.values())
+    ambiguous = len(targets) > 1 or len(donors) > 1
+    use_position = by_position and ambiguous and not identity_readable
+    if use_position:
+        def score(ti, di):
+            (tx, ty), (dx, dy) = targets[ti].pos, donors[di].pos
+            return -((tx - dx) ** 2 + (ty - dy) ** 2)
+        logger.info("preserve_face: identities unreadable (best sim %.2f), "
+                    "pairing %d target(s) and %d donor(s) by position",
+                    max(sims.values()), len(targets), len(donors))
+    else:
+        def score(ti, di):
+            return sims[ti, di]
+    pairs = sorted(((score(ti, di), ti, di) for (ti, di) in sims), reverse=True)
     used_t, used_d, matched = set(), set(), []
-    for sim, ti, di in pairs:
+    for _, ti, di in pairs:
         if ti in used_t or di in used_d:
             continue
         used_t.add(ti)
         used_d.add(di)
-        matched.append((targets[ti], donors[di], sim))
-    return matched
+        matched.append((targets[ti], donors[di], sims[ti, di]))
+    return matched, ("position" if use_position else "identity")
 
 
 def _restore_region(img, kps, session):
@@ -328,6 +357,8 @@ def apply_face_preservation(result_b64, source_paths, sim_min=None):
             return result_b64, status
         donors = _collect_donors(app, source_paths)
         targets = _detect_faces(app, img)
+        for t in targets:
+            _set_pos(t, img)
         status["donors"], status["targets"] = len(donors), len(targets)
         if not donors or not targets:
             status["error"] = ("no face detected (donors=%d targets=%d)"
@@ -338,7 +369,11 @@ def apply_face_preservation(result_b64, source_paths, sim_min=None):
         for d in donors:
             logger.info("preserve_face: donor rot=%d score=%.2f residual=%.0f",
                         d.rot, float(d.det_score), d.residual)
-        for target, donor, sim in _match_faces(targets, donors):
+        # Position is a fallback for unreadable identities, and only holds
+        # when every donor comes from the same frame as the render's layout.
+        matched, status["paired_by"] = _match_faces(
+            targets, donors, by_position=len(source_paths) == 1)
+        for target, donor, sim in matched:
             if sim < floor:
                 status["skipped"] += 1
                 logger.warning("preserve_face: swap skipped, sim=%.2f < %.2f "
