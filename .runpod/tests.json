@@ -12,8 +12,12 @@
     }
   ],
   "config": {
-    "gpuTypeId": "NVIDIA A40",
+    "gpuTypeId": "NVIDIA A100 80GB PCIe",
     "gpuCount": 1,
-    "allowedCudaVersions": ["12.8", "12.9"]
+    "allowedCudaVersions": [
+      "12.8",
+      "12.9",
+      "13.0"
+    ]
   }
 }
