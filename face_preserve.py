@@ -172,13 +172,22 @@ def _map_back(face, rot, w, h):
                           c[:, 0].max(), c[:, 1].max()], np.float32)
 
 
-def _detect_faces(app, img):
+def _detect_faces(app, img, require_keypoints=True):
     """Rotation-TTA detection. SCRFD is not rotation-invariant: on a heavily
     rotated face (a person lying down reads as upside-down) it either misses
     the face or lands the keypoints inverted (eyes on the chin), which poisons
     everything downstream — alignment, embedding, swap, restore. Detect on all
     four 90-degree orientations, map results back, keep the best-scored
-    detection per face."""
+    detection per face.
+
+    `require_keypoints=False` keeps detections whose keypoints are degenerate.
+    Only the paste path asks for that: it copies pixels between two images that
+    share their geometry, so it reads the box and nothing else. Dropping such a
+    box there would mean keeping the face Lustify repainted — the monster the
+    paste exists to avoid. The confidence floor stays as it is in both cases:
+    measured on the 77 renders that pasted nothing (2026-09-28), lowering it
+    from 0.55 to 0.25 recovers one single case, while 0.3-0.5 is exactly where
+    SCRFD puts a knee or a hand."""
     h, w = img.shape[:2]
     found = []
     for rot, name in ((None, 0), (cv2.ROTATE_90_CLOCKWISE, 90),
@@ -191,7 +200,7 @@ def _detect_faces(app, img):
             _map_back(face, rot, w, h)
             _, residual = _kps_residual(face.kps)
             face.rot, face.residual = name, residual
-            if residual > _MAX_KPS_RESIDUAL:
+            if require_keypoints and residual > _MAX_KPS_RESIDUAL:
                 logger.debug("preserve_face: dropped rot=%d score=%.2f "
                              "residual=%.0f (inverted/degenerate keypoints)",
                              name, float(face.det_score), residual)
@@ -354,9 +363,23 @@ def keep_stage_faces(result_b64, stage_b64):
         h, w = res.shape[:2]
         if st.shape[:2] != (h, w):
             st = cv2.resize(st, (w, h), interpolation=cv2.INTER_AREA)
-        faces = _detect_faces(app, st)
+        # Les deux images partagent leur geometrie (le refine encode le
+        # decodage de l'etape 1), donc une boite trouvee dans l'une vaut pour
+        # l'autre. On cherche dans les deux : l'etape 1 sort de Qwen, molle et
+        # peu contrastee, et c'est elle que le detecteur rate, tandis que la
+        # passe Lustify redessine un visage net et evident. Mesure du
+        # 2026-09-28 : sur 77 rendus ou l'etape 1 n'avait donne aucun visage,
+        # 75 en portent un que le detecteur trouve sans effort dans le rendu
+        # final (mediane 121 px au reglage de prod). L'union couvre aussi le
+        # cas inverse — un second visage recolle a moitie.
+        faces = _detect_faces(app, st, require_keypoints=False)
+        status["from_stage1"] = len(faces)
+        extra = [f for f in _detect_faces(app, res, require_keypoints=False)
+                 if all(_iou(f.bbox, k.bbox) < 0.4 for k in faces)]
+        status["from_refine"] = len(extra)
+        faces = faces + extra
         if not faces:
-            status["error"] = "no face in stage-1 image"
+            status["error"] = "no face in either image"
             return result_b64, status
         mask = np.zeros((h, w), np.float32)
         smallest = float("inf")
@@ -378,8 +401,9 @@ def keep_stage_faces(result_b64, stage_b64):
         if not ok:
             status["error"] = "png encode failed"
             return result_b64, status
-        logger.info("keep_stage_faces: %d stage-1 face(s) pasted over the refine",
-                    status["kept"])
+        logger.info("keep_stage_faces: %d face(s) pasted over the refine "
+                    "(%d found on stage 1, %d on the refine itself)",
+                    status["kept"], status["from_stage1"], status["from_refine"])
         return base64.b64encode(buf.tobytes()).decode("utf-8"), status
     except Exception as e:
         logger.error(f"keep_stage_faces failed, keeping the refined faces: {e}")
