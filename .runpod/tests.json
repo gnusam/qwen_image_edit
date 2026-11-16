@@ -12,7 +12,7 @@
     }
   ],
   "config": {
-    "gpuTypeId": "NVIDIA A100-SXM4-80GB",
+    "gpuTypeId": "NVIDIA A40",
     "gpuCount": 1,
     "allowedCudaVersions": [
       "12.8",
