@@ -1,0 +1,39 @@
+# Sonde de validation des workflows ComfyUI, sans GPU ni poids.
+#
+# La validation d'un prompt par ComfyUI ne lit jamais les poids : les loaders
+# controlent leur `*_name` contre la simple liste des fichiers du dossier de
+# modeles. Des fichiers VIDES aux bons noms suffisent donc a reproduire fidelement
+# un `prompt_outputs_failed_validation` (~2 Go au lieu de ~45 Go), et `--cpu`
+# suffit puisque la validation precede l'execution.
+#
+#   docker build --network host -f tools/comfy-probe/Dockerfile.validate \
+#       -t comfy-probe:validate tools/comfy-probe
+#   docker run --rm --network none -v "$PWD":/repo:ro comfy-probe:validate
+#
+# `--network none` : rien ne doit sortir, ce qui prouve qu'aucun poids n'est
+# telecharge a l'execution. Le depot est monte (pas copie) : la sonde valide les
+# workflows et les graphes que le handler construit, tels qu'ils sont sur le
+# disque. Le SHA est celui du Dockerfile du fork ; a bumper avec lui.
+#
+# Limite connue : base python:3.12-slim, sans ComfyUI-Manager ni KJNodes ni les
+# pip install d'insightface/onnxruntime. Un conflit de dependances ou un noeud
+# ecrase par un custom node ne se verrait pas ici.
+FROM python:3.12-slim
+ARG COMFYUI_SHA=33799c4a2ee286b5b6b8aac3c45c43245641fb47
+RUN apt-get update && apt-get install -y --no-install-recommends git curl \
+    && rm -rf /var/lib/apt/lists/*
+RUN git clone https://github.com/comfyanonymous/ComfyUI.git /ComfyUI \
+    && cd /ComfyUI && git checkout ${COMFYUI_SHA}
+WORKDIR /ComfyUI
+RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir -r requirements.txt
+# Les noms exacts que le Dockerfile du fork bake dans l'image.
+RUN mkdir -p models/text_encoders models/vae models/diffusion_models models/loras models/checkpoints input \
+    && touch models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors \
+             models/vae/qwen_image_vae.safetensors \
+             models/vae/sdxl_vae_fp16fix.safetensors \
+             models/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors \
+             models/loras/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors \
+             models/checkpoints/lustifySDXLNSFW_endgame.safetensors
+COPY probe.py /probe.py
+CMD ["python", "/probe.py"]

@@ -1,0 +1,169 @@
+{
+  "200": {
+    "inputs": {
+      "ckpt_name": "lustifySDXLNSFW_endgame.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Lustify V5 checkpoint (stage 2)"
+    }
+  },
+  "201": {
+    "inputs": {
+      "vae_name": "sdxl_vae_fp16fix.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "SDXL VAE fp16-fix (external \u2014 avoids NaN/black)"
+    }
+  },
+  "202": {
+    "inputs": {
+      "pixels": [
+        "207",
+        0
+      ],
+      "vae": [
+        "201",
+        0
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "Encode stage-1 image into SDXL latent"
+    }
+  },
+  "203": {
+    "inputs": {
+      "text": "nude, completely naked, fully nude, photorealistic, natural detailed skin texture, realistic anatomy, soft natural lighting, same pose, same background, same framing, sharp focus, high detail, professional photography",
+      "clip": [
+        "200",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Lustify positive (NSFW)"
+    }
+  },
+  "204": {
+    "inputs": {
+      "text": "clothing, clothes, shirt, dress, underwear, lingerie, bikini, swimsuit, cartoon, anime, illustration, drawing, painting, 3d render, cgi, deformed, bad anatomy, extra limbs, mutated hands, disfigured, blurry, low quality, watermark, text, logo, signature",
+      "clip": [
+        "200",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Lustify negative"
+    }
+  },
+  "205": {
+    "inputs": {
+      "seed": 42,
+      "steps": 28,
+      "cfg": 5.5,
+      "sampler_name": "dpmpp_2m_sde",
+      "scheduler": "karras",
+      "denoise": 0.55,
+      "model": [
+        "210",
+        0
+      ],
+      "positive": [
+        "203",
+        0
+      ],
+      "negative": [
+        "204",
+        0
+      ],
+      "latent_image": [
+        "209",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "Lustify KSampler (stage 2 \u2014 masked refine, denoise 0.55 x mask)"
+    }
+  },
+  "206": {
+    "inputs": {
+      "samples": [
+        "205",
+        0
+      ],
+      "vae": [
+        "201",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "Lustify VAE Decode (final pixels)"
+    }
+  },
+  "207": {
+    "inputs": {
+      "image": "stage1.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load stage-1 image (Qwen, injected by handler)"
+    }
+  },
+  "208": {
+    "inputs": {
+      "image": "face_mask.png",
+      "channel": "red"
+    },
+    "class_type": "LoadImageMask",
+    "_meta": {
+      "title": "Load denoise mask (white = full denoise, injected by handler)"
+    }
+  },
+  "209": {
+    "inputs": {
+      "samples": [
+        "202",
+        0
+      ],
+      "mask": [
+        "208",
+        0
+      ]
+    },
+    "class_type": "SetLatentNoiseMask",
+    "_meta": {
+      "title": "Per-pixel denoise mask (faces low, body 1.0)"
+    }
+  },
+  "210": {
+    "inputs": {
+      "strength": 1.0,
+      "model": [
+        "200",
+        0
+      ]
+    },
+    "class_type": "DifferentialDiffusion",
+    "_meta": {
+      "title": "Differential Diffusion (denoise follows the mask)"
+    }
+  },
+  "60": {
+    "inputs": {
+      "filename_prefix": "qwen2511_lustify",
+      "images": [
+        "206",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save final image (stage 2 output)"
+    }
+  }
+}

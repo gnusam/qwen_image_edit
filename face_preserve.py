@@ -181,8 +181,9 @@ def _detect_faces(app, img, require_keypoints=True):
     detection per face.
 
     `require_keypoints=False` keeps detections whose keypoints are degenerate.
-    Only the paste path asks for that: it copies pixels between two images that
-    share their geometry, so it reads the box and nothing else. Dropping such a
+    The paste and the denoise mask ask for that: they use the box alone (the
+    paste copies pixels between two images that share their geometry, the mask
+    paints an ellipse), and never the keypoints or the embedding. Dropping such a
     box there would mean keeping the face Lustify repainted — the monster the
     paste exists to avoid. The confidence floor stays as it is in both cases:
     measured on the 77 renders that pasted nothing (2026-09-28), lowering it
@@ -409,6 +410,119 @@ def keep_stage_faces(result_b64, stage_b64):
         logger.error(f"keep_stage_faces failed, keeping the refined faces: {e}")
         status["error"] = str(e)[:300]
         return result_b64, status
+
+
+# Defaults of the masked refine (`refine_face_mode: "mask"`), see
+# build_face_denoise_mask. The level is a fraction of the refine's denoise:
+# under Differential Diffusion a pixel of value m is only denoised on the steps
+# where the schedule threshold is <= m, so 0.35 x denoise 0.55 is ~0.19.
+REFINE_FACE_LEVEL = 0.35
+REFINE_FACE_FEATHER = 0.25
+# Below this face size (smaller side, pixels) the face is not denoised at all:
+# at ~12 latent pixels a weak denoise only smears the eyes and the nose.
+REFINE_FACE_MIN_PX = 96
+
+
+def _source_embeddings(app, source_path):
+    """ArcFace embeddings of the faces of the job's source image. Measurement
+    only: any problem gives no embedding, never an error."""
+    if not source_path:
+        return []
+    try:
+        img = cv2.imread(source_path)
+        if img is None:
+            return []
+        return [f.normed_embedding for f in _detect_faces(app, img)]
+    except Exception as e:
+        logger.warning(f"source embeddings unavailable: {e}")
+        return []
+
+
+def _sim_to_source(face, source_embs):
+    """Best cosine similarity of `face` to the source faces, None if either
+    side has no embedding."""
+    try:
+        emb = getattr(face, "normed_embedding", None)
+        if emb is None or not source_embs:
+            return None
+        # The embedding is aligned on the keypoints: on degenerate or inverted
+        # ones (kept for the box alone) it reads ~0 and would pass for a lost
+        # identity. Unmeasurable, not zero.
+        if getattr(face, "residual", float("inf")) > _MAX_KPS_RESIDUAL:
+            return None
+        return round(max(float(np.dot(emb, s)) for s in source_embs), 3)
+    except Exception:
+        return None
+
+
+def build_face_denoise_mask(stage_bytes, level=REFINE_FACE_LEVEL,
+                            feather=REFINE_FACE_FEATHER,
+                            min_px=REFINE_FACE_MIN_PX, source_path=None):
+    """Per-pixel denoise strength for the Lustify pass, faces kept low.
+
+    The paste (keep_stage_faces) cures a Lustify-redrawn face by gluing the
+    Qwen one back, and the seam shows. Here the refine itself denoises the
+    faces little instead: Lustify keeps the Qwen identity and only harmonises
+    the texture, nothing to paste. Faces are found on the stage-1 image with
+    the detector keep_stage_faces uses, and the ellipse has the same geometry.
+    The mask is 1.0 over the body, `level` on a face, 0.0 on a face smaller
+    than `min_px` (kept as is), feathered by `feather` x the face size; where
+    faces overlap the lowest value wins.
+    With `source_path` (the job's input image) each face also reports `sim_src`,
+    its ArcFace similarity to the best matching face of the source (None when
+    the source has none): a measurement only, it changes nothing in the mask.
+    Returns (float32 HxW mask in [0, 1], status). Fail-safe: any problem gives
+    the all-1.0 mask (a plain full refine) with the error in the status."""
+    status = {"mode": "mask", "masked": 0, "small": 0, "level": level,
+              "feather": feather, "min_px": min_px, "faces": []}
+    mask = None
+    try:
+        img = cv2.imdecode(np.frombuffer(stage_bytes, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            status["error"] = "unreadable image"
+            return np.ones((8, 8), np.float32), status
+        h, w = img.shape[:2]
+        mask = np.ones((h, w), np.float32)
+        app, _ = _load_face_models()
+        src_embs = _source_embeddings(app, source_path)
+        for f in _detect_faces(app, img, require_keypoints=False):
+            x1, y1, x2, y2 = [float(v) for v in f.bbox[:4]]
+            fw, fh = x2 - x1, y2 - y1
+            small = min(fw, fh) < min_px
+            value = 0.0 if small else level
+            # Same ellipse as keep_stage_faces: forehead and chin sit outside
+            # SCRFD's box.
+            centre = (int((x1 + x2) / 2), int((y1 + y2) / 2 - 0.05 * fh))
+            axes = (max(1, int(0.62 * fw)), max(1, int(0.78 * fh)))
+            face = np.zeros((h, w), np.float32)
+            cv2.ellipse(face, centre, axes, 0, 0, 360, 1.0, -1)
+            # Feather sized on this face, so a small one keeps its shape.
+            k = max(3, int(feather * min(fw, fh)) | 1)
+            face = cv2.GaussianBlur(face, (k, k), 0)
+            mask = np.minimum(mask, 1.0 - face * (1.0 - value))
+            status["masked"] += 1
+            status["small"] += int(small)
+            status["faces"].append({"w": int(round(fw)), "h": int(round(fh)),
+                                    "det": round(float(f.det_score), 2),
+                                    "sim_src": _sim_to_source(f, src_embs)})
+        logger.info("build_face_denoise_mask: %d face(s) (%d below %d px), "
+                    "level %.2f", status["masked"], status["small"], min_px,
+                    level)
+        return np.clip(mask, 0.0, 1.0), status
+    except Exception as e:
+        logger.error(f"build_face_denoise_mask failed, denoising everything: {e}")
+        status.update(masked=0, small=0, faces=[], error=str(e)[:300])
+        if mask is None:
+            mask = np.ones((8, 8), np.float32)
+        return np.ones_like(mask), status
+
+
+def encode_mask_png(mask):
+    """8-bit grayscale PNG of a [0, 1] mask, for ComfyUI's LoadImageMask."""
+    ok, buf = cv2.imencode(".png", np.round(mask * 255.0).astype(np.uint8))
+    if not ok:
+        raise RuntimeError("mask png encode failed")
+    return buf.tobytes()
 
 
 def apply_face_preservation(result_b64, source_paths, sim_min=None):

@@ -147,7 +147,10 @@ def get_images(ws, prompt):
 
 # --- Face preservation (preserve_face) -------------------------------------
 # Identity-matched multi-face swap + GFPGAN restore; lives in face_preserve.py.
-from face_preserve import apply_face_preservation, keep_stage_faces
+from face_preserve import (apply_face_preservation, keep_stage_faces,
+                           build_face_denoise_mask, encode_mask_png)
+from refine_mask import (apply_refine_overrides, build_masked_refine_prompt,
+                         prune_to_stage1, refine_face_params)
 
 def load_workflow(workflow_path):
     with open(workflow_path, 'r') as file:
@@ -320,6 +323,39 @@ def save_base64_to_file(base64_data, temp_dir, output_filename):
         logger.error(f"❌ Base64 디코딩 실패: {e}")
         raise Exception(f"Base64 디코딩 실패: {e}")
 
+def run_masked_refine(ws, prompt, job_input, task_id, level, feather, min_px,
+                      source_path=None):
+    """Refine with a per-pixel denoise mask (`refine_face_mode: "mask"`).
+
+    Two prompts on the same connection. A is the refine workflow cut down to
+    its Qwen stage: its only output is the stage-1 image. The faces found on
+    that image set the mask of B, the Lustify pass, which denoises them little
+    (face_preserve.build_face_denoise_mask), and are measured against the source
+    face (`sim_src`). ComfyUI keeps the loaders' outputs
+    from one prompt to the next, so the split reloads no model.
+    Returns (images of B, stage-1 image b64, mask status)."""
+    images_a = get_images(ws, prune_to_stage1(prompt))
+    stage1 = (images_a.get(_NODE_STAGE1_IMAGE) or [None])[0]
+    if not stage1:
+        raise RuntimeError("masked refine: stage 1 returned no image")
+    stage1_bytes = base64.b64decode(stage1)
+    mask, status = build_face_denoise_mask(
+        stage1_bytes, level=level, feather=feather, min_px=min_px,
+        source_path=source_path)
+    # Same mechanism as the input images: a file under the task directory,
+    # given to ComfyUI by absolute path.
+    os.makedirs(task_id, exist_ok=True)
+    stage1_path = os.path.abspath(os.path.join(task_id, "stage1.png"))
+    mask_path = os.path.abspath(os.path.join(task_id, "face_mask.png"))
+    with open(stage1_path, "wb") as f:
+        f.write(stage1_bytes)
+    with open(mask_path, "wb") as f:
+        f.write(encode_mask_png(mask))
+    images_b = get_images(
+        ws, build_masked_refine_prompt(stage1_path, mask_path, job_input))
+    return images_b, stage1, status
+
+
 def handler(job):
     job_input = job.get("input", {})
 
@@ -370,17 +406,12 @@ def handler(job):
     prompt = load_workflow(workflow_path)
 
     # Optional override of the stage-2 (Lustify) NSFW prompts in refine mode.
+    # In `mask` mode the Lustify stage is cut from this prompt and rebuilt as
+    # a second prompt (run_masked_refine), which takes the same overrides.
+    face_mode, face_level, face_feather, face_min_px = refine_face_params(job_input)
+    mask_mode = refine and num_images == 1 and face_mode == "mask"
     if refine and num_images == 1:
-        if job_input.get("refine_prompt") and "203" in prompt:
-            prompt["203"]["inputs"]["text"] = job_input["refine_prompt"]
-        if job_input.get("refine_negative") and "204" in prompt:
-            prompt["204"]["inputs"]["text"] = job_input["refine_negative"]
-        if "205" in prompt:
-            try:
-                prompt["205"]["inputs"]["denoise"] = float(
-                    job_input.get("refine_denoise", prompt["205"]["inputs"]["denoise"]))
-            except (TypeError, ValueError):
-                pass
+        apply_refine_overrides(prompt, job_input)
 
     # 노드 번호는 각 워크플로우 JSON과 동일하게 사용
     prompt[_NODE_IMAGE_1]["inputs"]["image"] = image_paths[0]
@@ -492,7 +523,14 @@ def handler(job):
             if attempt == max_attempts - 1:
                 raise Exception("웹소켓 연결 시간 초과 (3분)")
             time.sleep(5)
-    images = get_images(ws, prompt)
+    mask_status = None
+    if mask_mode:
+        images, stage1, mask_status = run_masked_refine(
+            ws, prompt, job_input, task_id, face_level, face_feather,
+            face_min_px, source_path=image_paths[0])
+    else:
+        images = get_images(ws, prompt)
+        stage1 = (images.get(_NODE_STAGE1_IMAGE) or [None])[0]
     ws.close()
 
     # 이미지가 없는 경우 처리
@@ -502,17 +540,27 @@ def handler(job):
     # The final render is node 60 in every workflow. The refine workflow also
     # saves its stage-1 image (61): never let dict order hand that one back.
     final_nodes = [_NODE_FINAL_IMAGE] if images.get(_NODE_FINAL_IMAGE) else list(images)
-    stage1 = (images.get(_NODE_STAGE1_IMAGE) or [None])[0]
     for node_id in final_nodes:
         if node_id == _NODE_STAGE1_IMAGE:
             continue
         if images[node_id]:
             result_b64 = images[node_id][0]
-            refine_faces = None
+            refine_faces = mask_status
+            if mask_mode:
+                # The faces were denoised little by the refine itself: nothing
+                # to paste, unless none was found on stage 1 (0.6 % of the
+                # renders measured), where the paste is the fallback it was.
+                refine_faces["fallback_paste"] = False
+                if (not refine_faces["masked"] and stage1
+                        and job_input.get("refine_keep_face", True)):
+                    result_b64, refine_faces["paste"] = keep_stage_faces(
+                        result_b64, stage1)
+                    refine_faces["fallback_paste"] = True
             # Refine: the SDXL pass redraws the faces past recognition; put
             # the Qwen faces back unless the caller opts out.
-            if refine and stage1 and job_input.get("refine_keep_face", True):
+            elif refine and stage1 and job_input.get("refine_keep_face", True):
                 result_b64, refine_faces = keep_stage_faces(result_b64, stage1)
+                refine_faces["mode"] = "paste"
             # Optional: restore the original subject's face(s) onto the result.
             if job_input.get("preserve_face") and image_paths:
                 raw_b64 = result_b64
