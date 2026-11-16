@@ -446,6 +446,26 @@ def handler(job):
                     pass
     if _NODE_SEED in prompt and "seed" in job_input:
         prompt[_NODE_SEED]["inputs"]["seed"] = job_input["seed"]
+    # `lightning: false` drops the bundled 4-step Lightning LoRA: node 89 goes to
+    # strength 0 (ComfyUI hands the model back untouched and the graph keeps the
+    # shape the user-LoRA chain relies on). The distilled 4 steps / cfg 1 make
+    # no sense without it, so the base schedule from the official 2511 workflow
+    # (40 steps, cfg 4) applies unless sampler_steps / cfg say otherwise.
+    if job_input.get("lightning") is False and _NODE_LIGHTNING_LORA in prompt:
+        prompt[_NODE_LIGHTNING_LORA]["inputs"]["strength_model"] = 0
+        if _NODE_SEED in prompt:
+            if "sampler_steps" not in job_input:
+                prompt[_NODE_SEED]["inputs"]["steps"] = 40
+            if "cfg" not in job_input:
+                prompt[_NODE_SEED]["inputs"]["cfg"] = 4.0
+    # What the stage-1 sampler really ran, echoed in the output: the caller
+    # stores it, and it is the positive proof that a pod runs this version.
+    sampler_status = None
+    if _NODE_SEED in prompt:
+        ks = prompt[_NODE_SEED]["inputs"]
+        lightning = (_NODE_LIGHTNING_LORA in prompt and
+                     float(prompt[_NODE_LIGHTNING_LORA]["inputs"].get("strength_model", 0)) > 0)
+        sampler_status = {"lightning": lightning, "steps": ks.get("steps"), "cfg": ks.get("cfg")}
     if _NODE_WIDTH in prompt and "width" in job_input:
         prompt[_NODE_WIDTH]["inputs"]["value"] = job_input["width"]
     if _NODE_HEIGHT in prompt and "height" in job_input:
@@ -572,6 +592,8 @@ def handler(job):
                     result_b64, image_paths, sim_min=job_input.get("face_sim_min"))
                 out = {"image": result_b64, "lora": lora_status,
                        "preserve_face": face_status}
+                if sampler_status is not None:
+                    out["sampler"] = sampler_status
                 if refine_faces is not None:
                     out["refine_faces"] = refine_faces
                 # Ship the untouched render alongside the swapped one so the
@@ -586,6 +608,8 @@ def handler(job):
             out = {"image": result_b64, "lora": lora_status}
             if refine_faces is not None:
                 out["refine_faces"] = refine_faces
+            if sampler_status is not None:
+                out["sampler"] = sampler_status
             return out
 
     return {"error": "이미지를 찾을 수 없습니다."}

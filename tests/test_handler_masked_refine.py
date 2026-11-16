@@ -166,3 +166,36 @@ def test_mask_ignore_hors_refine_une_image(h, monkeypatch):
     monkeypatch.setattr(h, "get_images", plain)
     out = h.handler(job)
     assert len(h.calls) == 1 and "refine_faces" not in out
+
+
+def test_lightning_par_defaut_et_statut_du_sampler(h, monkeypatch):
+    """Sans option, l'etape 1 garde Lightning a 4 etapes cfg 1, et le dit."""
+    _faces(h, monkeypatch, n_masked=1)
+    out = h.handler(_job())
+    p = h.calls[0]
+    assert p["89"]["inputs"]["strength_model"] == 1
+    assert (p["3"]["inputs"]["steps"], p["3"]["inputs"]["cfg"]) == (4, 1)
+    assert out["sampler"] == {"lightning": True, "steps": 4, "cfg": 1}
+
+
+def test_sans_lightning_reglage_officiel_40_etapes_cfg_4(h, monkeypatch):
+    _faces(h, monkeypatch, n_masked=1)
+    out = h.handler(_job(lightning=False))
+    p = h.calls[0]
+    assert p["89"]["inputs"]["strength_model"] == 0
+    assert "89" in p and p["89"]["inputs"]["lora_name"]       # graphe intact pour la chaine LoRA
+    assert (p["3"]["inputs"]["steps"], p["3"]["inputs"]["cfg"]) == (40, 4.0)
+    assert out["sampler"] == {"lightning": False, "steps": 40, "cfg": 4.0}
+
+
+def test_sans_lightning_les_reglages_explicites_priment(h, monkeypatch):
+    _faces(h, monkeypatch, n_masked=1)
+    out = h.handler(_job(lightning=False, sampler_steps=30, cfg=3))
+    assert out["sampler"] == {"lightning": False, "steps": 30, "cfg": 3.0}
+
+
+def test_sans_lightning_en_mode_mask_le_prompt_a_le_porte(h, monkeypatch):
+    _faces(h, monkeypatch, n_masked=1)
+    h.handler(_job(lightning=False, refine_face_mode="mask"))
+    a = h.calls[0]
+    assert a["89"]["inputs"]["strength_model"] == 0 and a["3"]["inputs"]["steps"] == 40
